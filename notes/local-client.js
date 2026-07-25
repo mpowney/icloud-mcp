@@ -7,10 +7,14 @@ const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { runAppleScript, runJXA, escapeAppleScript, escapeJXA } = require('../utils/applescript');
 
 const ATTACHMENT_EXPORT_ROOT = path.join(os.tmpdir(), 'icloud-mcp', 'notes-attachments');
+const ICLOUD_DRIVE_ROOT = path.join(os.homedir(), 'Library/Mobile Documents/com~apple~CloudDocs');
 const attachmentResourceStore = new Map();
+const execFileAsync = promisify(execFile);
 
 function sanitizeFileName(name) {
   return (name || 'attachment')
@@ -81,6 +85,33 @@ function buildAttachmentResourceUri(noteId, attachmentId) {
   return `notes-attachment://${encodeURIComponent(noteId)}/${encodeURIComponent(attachmentId)}`;
 }
 
+function isUnderIcloudDrive(filePath) {
+  if (!filePath) return false;
+  const root = path.resolve(ICLOUD_DRIVE_ROOT);
+  const candidate = path.resolve(filePath);
+  return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+function toIcloudRelativePath(filePath) {
+  if (!isUnderIcloudDrive(filePath)) return null;
+  return path.relative(ICLOUD_DRIVE_ROOT, filePath);
+}
+
+async function readDownloadingStatus(filePath) {
+  try {
+    const { stdout } = await execFileAsync('mdls', ['-raw', '-name', 'kMDItemDownloadingStatus', filePath], {
+      timeout: 4000,
+      maxBuffer: 256 * 1024
+    });
+
+    const value = (stdout || '').trim();
+    if (!value || value === '(null)') return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
 async function enrichAttachment(raw, noteId, index) {
   const attachment = {
     attachmentId: makeAttachmentId(noteId, raw, index),
@@ -94,6 +125,9 @@ async function enrichAttachment(raw, noteId, index) {
     uti: raw?.uti || null,
     type: raw?.type || null,
     size: typeof raw?.size === 'number' ? raw.size : null,
+    icloudRelativePath: null,
+    cloudOnly: false,
+    downloadingStatus: null,
     available: false,
     exportHint: 'not_available'
   };
@@ -102,6 +136,8 @@ async function enrichAttachment(raw, noteId, index) {
   if (!candidatePath) {
     return attachment;
   }
+
+  attachment.icloudRelativePath = toIcloudRelativePath(candidatePath);
 
   try {
     const stat = await fs.stat(candidatePath);
@@ -116,9 +152,22 @@ async function enrichAttachment(raw, noteId, index) {
       if (!attachment.mimeType) {
         attachment.mimeType = guessMimeTypeFromName(attachment.name);
       }
+
+      if (attachment.icloudRelativePath) {
+        const downloadingStatus = await readDownloadingStatus(candidatePath);
+        if (downloadingStatus) {
+          attachment.downloadingStatus = downloadingStatus;
+        }
+      }
     }
   } catch {
-    attachment.exportHint = 'metadata_only';
+    if (attachment.icloudRelativePath) {
+      attachment.cloudOnly = true;
+      attachment.exportHint = 'cloud_only_placeholder';
+      attachment.downloadingStatus = 'NotDownloaded';
+    } else {
+      attachment.exportHint = 'metadata_only';
+    }
   }
 
   return attachment;
@@ -386,12 +435,23 @@ async function exportNoteAttachment(noteId, attachmentId) {
     throw new Error('Attachment export is not supported for this item (no file path exposed by Notes scripting).');
   }
 
+  if (attachment.cloudOnly && attachment.icloudRelativePath) {
+    throw new Error(`Attachment is a cloud-only placeholder. Download it first with icloud-download using path: ${attachment.icloudRelativePath}`);
+  }
+
   await fs.mkdir(ATTACHMENT_EXPORT_ROOT, { recursive: true });
 
   const baseName = sanitizeFileName(attachment.name || path.basename(sourcePath) || `attachment-${attachmentId}`);
   const targetPath = path.join(ATTACHMENT_EXPORT_ROOT, `${Date.now()}-${baseName}`);
 
-  await fs.copyFile(sourcePath, targetPath);
+  try {
+    await fs.copyFile(sourcePath, targetPath);
+  } catch (error) {
+    if (attachment.icloudRelativePath) {
+      throw new Error(`Attachment could not be read locally. It may be cloud-only. Download first with icloud-download using path: ${attachment.icloudRelativePath}`);
+    }
+    throw error;
+  }
   const stat = await fs.stat(targetPath);
 
   const mimeType = attachment.mimeType || guessMimeTypeFromName(baseName);

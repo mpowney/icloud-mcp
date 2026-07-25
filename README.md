@@ -217,6 +217,7 @@ Endpoints:
 
 Attachment flow:
 - Call `read-note` with `includeAttachments: true` to get attachment metadata and `attachmentId`.
+- If an attachment has `exportHint: "cloud_only_placeholder"`, download it locally first with `icloud-download` using the returned `icloudRelativePath`.
 - Call `note-export-attachment` with `noteId` and `attachmentId`.
 - Use MCP `resources/read` with the returned URI (for example `notes-attachment://...`) to fetch content.
 
