@@ -68,23 +68,6 @@ function isLikelyTextFile(buffer, mimeType) {
   return !buffer.includes(0);
 }
 
-function makeAttachmentId(noteId, raw, index) {
-  const input = [
-    noteId,
-    raw?.scriptId || '',
-    raw?.filePath || '',
-    raw?.url || '',
-    raw?.name || '',
-    String(index)
-  ].join('|');
-
-  return crypto.createHash('sha1').update(input).digest('hex').slice(0, 20);
-}
-
-function buildAttachmentResourceUri(noteId, attachmentId) {
-  return `notes-attachment://${encodeURIComponent(noteId)}/${encodeURIComponent(attachmentId)}`;
-}
-
 function parseReferenceScheme(value) {
   if (!value || typeof value !== 'string') return null;
   const match = value.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
@@ -101,7 +84,6 @@ function classifyAttachmentKind(attachment) {
   if (mime.startsWith('image/') || uti.includes('image') || type.includes('image')) return 'image';
   if (mime.startsWith('video/') || uti.includes('movie') || type.includes('video')) return 'video';
   if (mime.startsWith('audio/') || uti.includes('audio') || type.includes('audio')) return 'audio';
-  if (uti.includes('pdf') || mime === 'application/pdf') return 'file';
   if (uti.includes('drawing') || type.includes('drawing')) return 'drawing';
   if (uti.includes('scan') || type.includes('scan')) return 'scan';
   if (attachment.filePath || attachment.url) return 'file';
@@ -115,9 +97,7 @@ function isResolvableReference(attachment) {
 function inferUnresolvedReason(attachment) {
   if (attachment.cloudOnly) return 'cloud_only_placeholder';
   const scheme = attachment.referenceScheme || parseReferenceScheme(attachment.url);
-  if (scheme && !['file', 'http', 'https'].includes(scheme)) {
-    return 'unsupported_scheme';
-  }
+  if (scheme && !['file', 'http', 'https'].includes(scheme)) return 'unsupported_scheme';
   if (attachment.url || attachment.filePath) return 'not_locally_resolved';
   return 'no_local_path_exposed';
 }
@@ -128,12 +108,29 @@ function buildUnresolvedEmbed(attachment) {
     name: attachment.name || null,
     sourceKind: attachment.sourceKind,
     referenceScheme: attachment.referenceScheme || parseReferenceScheme(attachment.url),
-    rawReference: attachment.url || attachment.filePath || null,
+    rawReference: attachment.rawReference || attachment.url || attachment.filePath || null,
     reason: inferUnresolvedReason(attachment),
     exportHint: attachment.exportHint,
     cloudOnly: attachment.cloudOnly === true,
     icloudRelativePath: attachment.icloudRelativePath || null
   };
+}
+
+function makeAttachmentId(noteId, raw, index) {
+  const input = [
+    noteId,
+    raw?.scriptId || '',
+    raw?.filePath || '',
+    raw?.url || '',
+    raw?.name || '',
+    String(index)
+  ].join('|');
+
+  return crypto.createHash('sha1').update(input).digest('hex').slice(0, 20);
+}
+
+function buildAttachmentResourceUri(noteId, attachmentId) {
+  return `notes-attachment://${encodeURIComponent(noteId)}/${encodeURIComponent(attachmentId)}`;
 }
 
 function isUnderIcloudDrive(filePath) {
@@ -191,6 +188,7 @@ async function enrichAttachment(raw, noteId, index) {
 
   const candidatePath = attachment.filePath || toAbsolutePathFromFileUrl(attachment.url);
   if (!candidatePath) {
+    attachment.attachmentKind = classifyAttachmentKind(attachment);
     return attachment;
   }
 
@@ -207,14 +205,13 @@ async function enrichAttachment(raw, noteId, index) {
       attachment.size = attachment.size ?? stat.size;
       attachment.available = true;
       attachment.exportHint = 'exportable';
+      attachment.cloudState = 'local';
       if (!attachment.name) {
         attachment.name = path.basename(candidatePath);
       }
       if (!attachment.mimeType) {
         attachment.mimeType = guessMimeTypeFromName(attachment.name);
       }
-
-      attachment.cloudState = 'local';
     }
   } catch {
     if (attachment.icloudRelativePath || attachment.downloadingStatus === 'NotDownloaded') {
@@ -228,7 +225,6 @@ async function enrichAttachment(raw, noteId, index) {
   }
 
   attachment.attachmentKind = classifyAttachmentKind(attachment);
-
   return attachment;
 }
 
@@ -244,6 +240,7 @@ async function normalizeAttachments(rawAttachments, noteId, maxAttachments = 50,
 
   for (let i = 0; i < rawAttachments.length && normalized.length < cap; i += 1) {
     const enriched = await enrichAttachment(rawAttachments[i], noteId, i);
+
     if (dedupeMode !== 'none') {
       const dedupeKey = dedupeMode === 'strict'
         ? [enriched.scriptId || '', enriched.filePath || '', enriched.url || '', enriched.name || '', enriched.sourceKind || ''].join('|')
@@ -254,6 +251,7 @@ async function normalizeAttachments(rawAttachments, noteId, maxAttachments = 50,
       }
       seen.add(dedupeKey);
     }
+
     normalized.push(enriched);
   }
 
@@ -333,7 +331,6 @@ async function listNotes(folderName = null, count = 25) {
     }
     `}
 
-    // Sort by modification date (newest first)
     allNotes.sort((a, b) => new Date(b.modificationDate) - new Date(a.modificationDate));
     JSON.stringify(allNotes.slice(0, ${count}));
   `;
@@ -356,34 +353,75 @@ async function readNote(noteId, options = {}) {
     : 'hybrid';
   const includeUnresolvedEmbeds = options.includeUnresolvedEmbeds !== false;
   const includeDiscoveryStats = options.includeDiscoveryStats === true;
-  const dedupeMode = ['none', 'safe', 'strict'].includes(options.dedupeMode)
-    ? options.dedupeMode
-    : 'safe';
+  const dedupeMode = ['none', 'safe', 'strict'].includes(options.dedupeMode) ? options.dedupeMode : 'safe';
   const useMethodDiscovery = attachmentDiscoveryMode !== 'html';
   const useHtmlDiscovery = attachmentDiscoveryMode !== 'jxa';
 
   const script = `
     const notes = Application('Notes');
-    const folders = notes.folders();
     let found = null;
+
+    function safeCall(fn, fallback = null) {
+      try {
+        return fn();
+      } catch (e) {
+        return fallback;
+      }
+    }
+
+    function getArray(value) {
+      if (!value) return [];
+      return Array.isArray(value) ? value : [];
+    }
+
+    function itemId(item) {
+      return safeCall(() => String(item.id()), null);
+    }
 
     function valueFor(item, key) {
       try {
         if (!item) return null;
         const candidate = item[key];
-        if (typeof candidate === 'function') {
-          return candidate.call(item);
-        }
+        if (typeof candidate === 'function') return candidate.call(item);
         return candidate;
       } catch (e) {
         return null;
       }
     }
 
+    function collectFoldersRecursive(container, out, seenFolderIds, depth = 0) {
+      if (!container || depth > 8) return;
+
+      const subfolders = safeCall(() => container.folders(), []);
+      const list = getArray(subfolders);
+      for (let i = 0; i < list.length; i += 1) {
+        const folder = list[i];
+        const fid = itemId(folder) || ('anon-folder-' + depth + '-' + i);
+        if (seenFolderIds[fid]) continue;
+        seenFolderIds[fid] = true;
+        out.push(folder);
+        collectFoldersRecursive(folder, out, seenFolderIds, depth + 1);
+      }
+    }
+
+    function collectAllFolders() {
+      const out = [];
+      const seenFolderIds = {};
+
+      collectFoldersRecursive(notes, out, seenFolderIds, 0);
+
+      const accounts = safeCall(() => notes.accounts(), []);
+      const accountList = getArray(accounts);
+      for (let i = 0; i < accountList.length; i += 1) {
+        collectFoldersRecursive(accountList[i], out, seenFolderIds, 0);
+      }
+
+      return out;
+    }
+
     function pushIfObject(target, raw, source) {
       if (!raw) return;
-
-      const record = {
+      target.push({
         source,
         scriptId: valueFor(raw, 'id'),
         name: valueFor(raw, 'name') || valueFor(raw, 'fileName') || valueFor(raw, 'filename'),
@@ -397,38 +435,43 @@ async function readNote(noteId, options = {}) {
         htmlAttr: null,
         rawReference: null,
         referenceScheme: null
-      };
-
-      target.push(record);
+      });
     }
 
     function collectFromMethod(note, methodName, output, limit) {
       try {
         const method = note[methodName];
         if (typeof method !== 'function') return;
-
         const items = method.call(note) || [];
         if (!Array.isArray(items)) return;
 
         for (let i = 0; i < items.length && output.length < limit; i += 1) {
           pushIfObject(output, items[i], 'method:' + methodName);
         }
-      } catch (e) {
-        // Best-effort only.
+      } catch (e) {}
+    }
+
+    function collectFromHeuristicMethods(note, output, limit) {
+      const names = [
+        'attachments', 'mediaItems', 'objects', 'embeddedObjects', 'files', 'images', 'links',
+        'resources', 'assets', 'documents', 'sharedItems', 'items', 'attachmentsByDate'
+      ];
+      for (let i = 0; i < names.length && output.length < limit; i += 1) {
+        collectFromMethod(note, names[i], output, limit);
       }
     }
 
     function collectFromBody(body, output, limit) {
       try {
-        const attrRegex = /<(img|a|source|video|audio|object|embed)\b[^>]*?(src|href|data|srcset|poster|data-src)=["']([^"']+)["']/gi;
-        const cssRegex = /style=["'][^"']*url\(([^\)]+)\)[^"']*["']/gi;
+        const attrRegex = /<([a-zA-Z0-9:-]+)\\b[^>]*?\\b(src|href|data|srcset|poster|data-src|data-url|data-attachment-url|data-asset-url)=["']([^"']+)["']/gi;
+        const cssRegex = /style=["'][^"']*url\\(([^\\)]+)\\)[^"']*["']/gi;
         let match;
 
         while ((match = attrRegex.exec(body)) && output.length < limit) {
           const htmlTag = (match[1] || '').toLowerCase();
           const htmlAttr = (match[2] || '').toLowerCase();
           const rawValue = (match[3] || '').trim();
-          const reference = htmlAttr === 'srcset' ? rawValue.split(',')[0].trim().split(/\s+/)[0] : rawValue;
+          const reference = htmlAttr === 'srcset' ? rawValue.split(',')[0].trim().split(/\\s+/)[0] : rawValue;
 
           output.push({
             source: 'body-html',
@@ -465,60 +508,108 @@ async function readNote(noteId, options = {}) {
             referenceScheme: (rawValue.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/) || [])[1] || null
           });
         }
-      } catch (e) {
-        // Best-effort only.
-      }
+
+        if (output.length < limit && /<object\\b|<embed\\b|x-apple-|x-coredata-|cid:/i.test(body || '')) {
+          output.push({
+            source: 'body-signal',
+            url: null,
+            filePath: null,
+            name: null,
+            size: null,
+            mimeType: null,
+            uti: null,
+            type: null,
+            scriptId: null,
+            htmlTag: null,
+            htmlAttr: null,
+            rawReference: null,
+            referenceScheme: null
+          });
+        }
+      } catch (e) {}
     }
 
-    for (let folder of folders) {
-      if (found) break;
+    function buildNoteResult(note, folderName, accountName) {
+      const body = safeCall(() => note.body(), '');
+      const plaintext = safeCall(() => note.plaintext(), '');
+      const attachments = [];
+      const discovery = {
+        mode: '${escapeJXA(attachmentDiscoveryMode)}',
+        attemptedSources: [],
+        sourceCounts: {}
+      };
+
+      if (${includeAttachments}) {
+        if (${useMethodDiscovery}) {
+          const candidateMethods = ['attachments', 'mediaItems', 'objects', 'embeddedObjects', 'files', 'images', 'links', 'resources', 'assets', 'documents'];
+          for (let i = 0; i < candidateMethods.length && attachments.length < ${maxAttachments}; i += 1) {
+            const before = attachments.length;
+            collectFromMethod(note, candidateMethods[i], attachments, ${maxAttachments});
+            const added = attachments.length - before;
+            discovery.attemptedSources.push('method:' + candidateMethods[i]);
+            discovery.sourceCounts['method:' + candidateMethods[i]] = added;
+          }
+
+          if (attachments.length < ${maxAttachments}) {
+            const before = attachments.length;
+            collectFromHeuristicMethods(note, attachments, ${maxAttachments});
+            const added = attachments.length - before;
+            discovery.attemptedSources.push('method:heuristic');
+            discovery.sourceCounts['method:heuristic'] = added;
+          }
+        }
+
+        if (${useHtmlDiscovery} && attachments.length < ${maxAttachments}) {
+          const before = attachments.length;
+          collectFromBody(body || '', attachments, ${maxAttachments});
+          const added = attachments.length - before;
+          discovery.attemptedSources.push('body-html');
+          discovery.sourceCounts['body-html'] = added;
+        }
+      }
+
+      return {
+        id: safeCall(() => note.id(), null),
+        name: safeCall(() => note.name(), null),
+        body,
+        plaintext,
+        creationDate: safeCall(() => note.creationDate().toISOString(), null),
+        modificationDate: safeCall(() => note.modificationDate().toISOString(), null),
+        folder: folderName,
+        account: accountName,
+        attachments,
+        attachmentDiscovery: discovery
+      };
+    }
+
+    const folders = collectAllFolders();
+    for (let f = 0; f < folders.length && !found; f += 1) {
+      const folder = folders[f];
       try {
-        const notesList = folder.notes();
-        for (let note of notesList) {
-          if (note.id() === "${escapeJXA(noteId)}") {
-            // Get plain text by stripping HTML
-            const body = note.body();
-            const plaintext = note.plaintext();
+        const notesList = getArray(safeCall(() => folder.notes(), []));
+        const folderName = safeCall(() => folder.name(), null);
+        const accountName = safeCall(() => folder.container().name(), null);
 
-            const attachments = [];
-            const discovery = {
-              mode: '${escapeJXA(attachmentDiscoveryMode)}',
-              attemptedSources: [],
-              sourceCounts: {}
-            };
-            if (${includeAttachments}) {
-              const candidateMethods = ['attachments', 'mediaItems', 'objects', 'embeddedObjects', 'files', 'images', 'links'];
-              if (${useMethodDiscovery}) {
-                for (let i = 0; i < candidateMethods.length && attachments.length < ${maxAttachments}; i += 1) {
-                  const before = attachments.length;
-                  collectFromMethod(note, candidateMethods[i], attachments, ${maxAttachments});
-                  const added = attachments.length - before;
-                  discovery.attemptedSources.push('method:' + candidateMethods[i]);
-                  discovery.sourceCounts['method:' + candidateMethods[i]] = added;
-                }
-              }
+        for (let i = 0; i < notesList.length && !found; i += 1) {
+          const note = notesList[i];
+          if (safeCall(() => note.id(), null) === '${escapeJXA(noteId)}') {
+            found = buildNoteResult(note, folderName, accountName);
+          }
+        }
+      } catch (e) {}
+    }
 
-              if (${useHtmlDiscovery} && attachments.length < ${maxAttachments}) {
-                const before = attachments.length;
-                collectFromBody(body || '', attachments, ${maxAttachments});
-                const added = attachments.length - before;
-                discovery.attemptedSources.push('body-html');
-                discovery.sourceCounts['body-html'] = added;
-              }
-            }
-
-            found = {
-              id: note.id(),
-              name: note.name(),
-              body: body,
-              plaintext: plaintext,
-              creationDate: note.creationDate().toISOString(),
-              modificationDate: note.modificationDate().toISOString(),
-              folder: folder.name(),
-              attachments,
-              attachmentDiscovery: discovery
-            };
-            break;
+    if (!found) {
+      try {
+        const globalNotes = getArray(safeCall(() => notes.notes(), []));
+        for (let i = 0; i < globalNotes.length && !found; i += 1) {
+          const note = globalNotes[i];
+          if (safeCall(() => note.id(), null) === '${escapeJXA(noteId)}') {
+            found = buildNoteResult(
+              note,
+              safeCall(() => note.container().name(), null),
+              safeCall(() => note.container().container().name(), null)
+            );
           }
         }
       } catch (e) {}
@@ -533,6 +624,8 @@ async function readNote(noteId, options = {}) {
   if (!parsed || !includeAttachments) {
     if (parsed && !includeAttachments) {
       delete parsed.attachments;
+      delete parsed.attachmentDiscovery;
+      delete parsed.unresolvedEmbeds;
     }
     return parsed;
   }
@@ -699,7 +792,6 @@ async function readAttachmentResource(uri) {
  * @returns {Promise<Object>} - Created note info
  */
 async function createNote({ title, body, folderName = 'Notes' }) {
-  // Notes uses HTML body, but we can pass plain text
   const htmlBody = `<h1>${escapeAppleScript(title)}</h1><br>${escapeAppleScript(body || '').replace(/\n/g, '<br>')}`;
 
   const script = `
