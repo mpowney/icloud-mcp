@@ -9,12 +9,13 @@ const { authTools } = require('./auth');
 function loadToolsAndMode() {
   let tools = [...authTools];
   let mode = 'cloud';
+  let resourceProviders = [];
 
   if (config.USE_LOCAL_MODE && config.IS_MACOS) {
     mode = 'local';
 
     const { remindersTools } = require('./reminders');
-    const { notesTools } = require('./notes');
+    const { notesTools, notesResources } = require('./notes');
     const { messagesTools } = require('./messages');
     const { safariTools } = require('./safari');
     const { musicTools } = require('./music');
@@ -35,6 +36,8 @@ function loadToolsAndMode() {
       ...musicTools,
       ...filesTools
     ];
+
+    resourceProviders = [notesResources].filter(Boolean);
   } else {
     const { emailTools } = require('./email');
     const { calendarTools } = require('./calendar');
@@ -52,7 +55,7 @@ function loadToolsAndMode() {
     ];
   }
 
-  return { tools, mode };
+  return { tools, mode, resourceProviders };
 }
 
 function createServerInfo(mode) {
@@ -64,7 +67,7 @@ function createServerInfo(mode) {
 }
 
 function createMcpCore() {
-  const { tools, mode } = loadToolsAndMode();
+  const { tools, mode, resourceProviders } = loadToolsAndMode();
   const serverInfo = createServerInfo(mode);
 
   async function handleRequest(request) {
@@ -80,7 +83,8 @@ function createMcpCore() {
               protocolVersion: '2024-11-05',
               serverInfo,
               capabilities: {
-                tools: {}
+                tools: {},
+                resources: {}
               }
             }
           };
@@ -100,6 +104,65 @@ function createMcpCore() {
               }))
             }
           };
+
+        case 'resources/list': {
+          const resources = [];
+
+          for (const provider of resourceProviders) {
+            if (!provider || typeof provider.list !== 'function') continue;
+
+            const listed = await provider.list();
+            if (Array.isArray(listed)) {
+              resources.push(...listed);
+            }
+          }
+
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              resources
+            }
+          };
+        }
+
+        case 'resources/read': {
+          const uri = params?.uri;
+          if (!uri || typeof uri !== 'string') {
+            return {
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32602,
+                message: 'resources/read requires a string uri'
+              }
+            };
+          }
+
+          for (const provider of resourceProviders) {
+            if (!provider || typeof provider.read !== 'function') continue;
+
+            const content = await provider.read(uri);
+            if (content) {
+              return {
+                jsonrpc: '2.0',
+                id,
+                result: {
+                  contents: [content]
+                }
+              };
+            }
+          }
+
+          return {
+            jsonrpc: '2.0',
+            id,
+            error: {
+              code: -32602,
+              message: `Resource not found: ${uri}`
+            }
+          };
+        }
 
         case 'tools/call': {
           const toolName = params?.name;
@@ -154,6 +217,7 @@ function createMcpCore() {
   return {
     tools,
     mode,
+    resourceProviders,
     serverInfo,
     handleRequest
   };

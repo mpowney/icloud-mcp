@@ -69,13 +69,21 @@ const notesTools = [
         noteId: {
           type: 'string',
           description: 'ID of the note to read (required)'
+        },
+        includeAttachments: {
+          type: 'boolean',
+          description: 'When true, include attachment metadata discovered from the note'
+        },
+        maxAttachments: {
+          type: 'number',
+          description: 'Maximum number of attachments to return when includeAttachments is true (default: 50, max: 500)'
         }
       },
       required: ['noteId']
     },
-    handler: async ({ noteId }) => {
+    handler: async ({ noteId, includeAttachments = false, maxAttachments = 50 }) => {
       try {
-        const note = await localClient.readNote(noteId);
+        const note = await localClient.readNote(noteId, { includeAttachments, maxAttachments });
         if (!note) {
           return {
             content: [{
@@ -92,6 +100,37 @@ const notesTools = [
         };
       } catch (error) {
         return handleError(error, 'read-note');
+      }
+    }
+  },
+  {
+    name: 'note-export-attachment',
+    description: 'Exports an embedded note attachment and returns a resource URI for retrieval',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        noteId: {
+          type: 'string',
+          description: 'ID of the note containing the attachment'
+        },
+        attachmentId: {
+          type: 'string',
+          description: 'Attachment ID obtained from read-note with includeAttachments=true'
+        }
+      },
+      required: ['noteId', 'attachmentId']
+    },
+    handler: async ({ noteId, attachmentId }) => {
+      try {
+        const result = await localClient.exportNoteAttachment(noteId, attachmentId);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(result, null, 2)
+          }]
+        };
+      } catch (error) {
+        return handleError(error, 'note-export-attachment');
       }
     }
   },
@@ -163,4 +202,13 @@ const notesTools = [
   }
 ];
 
-module.exports = { notesTools };
+const notesResources = {
+  async list() {
+    return localClient.listAttachmentResources();
+  },
+  async read(uri) {
+    return localClient.readAttachmentResource(uri);
+  }
+};
+
+module.exports = { notesTools, notesResources };

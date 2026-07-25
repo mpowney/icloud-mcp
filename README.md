@@ -39,7 +39,7 @@ Uses AppleScript to access native macOS apps. **Faster, works offline, more serv
 | **Calendar** | Calendar.app | 5 |
 | **Contacts** | Contacts.app | 5 |
 | **Reminders** | Reminders.app | 7 |
-| **Notes** | Notes.app | 5 |
+| **Notes** | Notes.app | 6 |
 | **Messages** | Messages.app | 1 |
 | **Safari** | Safari.app | 4 |
 | **Music** | Music.app | 7 |
@@ -58,7 +58,7 @@ Uses iCloud protocols (IMAP, CalDAV, CardDAV). Requires app-specific password.
 
 ## Features
 
-- **57 Tools** in local mode (17 in cloud mode)
+- **58 Tools** in local mode (17 in cloud mode)
 - **Dual Mode** - switch between local (fast) and cloud (remote access)
 - **9 Services** - Email, Calendar, Contacts, Reminders, Notes, Messages, Safari, Music, iCloud Drive (sync)
 - **Secure Authentication** - AppleScript permissions or app-specific passwords
@@ -204,15 +204,21 @@ Endpoints:
 | `delete-reminder` | Delete reminder |
 | `search-reminders` | Search reminders |
 
-### Notes (5) - Local Only
+### Notes (6) - Local Only
 
 | Tool | Description |
 |------|-------------|
 | `list-note-folders` | List note folders |
 | `list-notes` | List notes |
-| `read-note` | Read note content |
+| `read-note` | Read note content (supports `includeAttachments`) |
+| `note-export-attachment` | Export embedded file and return resource URI |
 | `create-note` | Create new note |
 | `search-notes` | Search notes |
+
+Attachment flow:
+- Call `read-note` with `includeAttachments: true` to get attachment metadata and `attachmentId`.
+- Call `note-export-attachment` with `noteId` and `attachmentId`.
+- Use MCP `resources/read` with the returned URI (for example `notes-attachment://...`) to fetch content.
 
 ### Messages (1) - Local Only
 
