@@ -77,13 +77,46 @@ const notesTools = [
         maxAttachments: {
           type: 'number',
           description: 'Maximum number of attachments to return when includeAttachments is true (default: 50, max: 500)'
+        },
+        attachmentDiscoveryMode: {
+          type: 'string',
+          enum: ['jxa', 'html', 'hybrid', 'deep'],
+          description: 'Attachment extraction strategy (default: hybrid)'
+        },
+        includeUnresolvedEmbeds: {
+          type: 'boolean',
+          description: 'When true, include unresolved embed references that may represent hidden attachments'
+        },
+        includeDiscoveryStats: {
+          type: 'boolean',
+          description: 'When true, include attachment extraction diagnostics'
+        },
+        dedupeMode: {
+          type: 'string',
+          enum: ['none', 'safe', 'strict'],
+          description: 'Deduplication mode for discovered attachments (default: safe)'
         }
       },
       required: ['noteId']
     },
-    handler: async ({ noteId, includeAttachments = false, maxAttachments = 50 }) => {
+    handler: async ({
+      noteId,
+      includeAttachments = false,
+      maxAttachments = 50,
+      attachmentDiscoveryMode = 'hybrid',
+      includeUnresolvedEmbeds = true,
+      includeDiscoveryStats = false,
+      dedupeMode = 'safe'
+    }) => {
       try {
-        const note = await localClient.readNote(noteId, { includeAttachments, maxAttachments });
+        const note = await localClient.readNote(noteId, {
+          includeAttachments,
+          maxAttachments,
+          attachmentDiscoveryMode,
+          includeUnresolvedEmbeds,
+          includeDiscoveryStats,
+          dedupeMode
+        });
         if (!note) {
           return {
             content: [{

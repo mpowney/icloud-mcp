@@ -210,13 +210,16 @@ Endpoints:
 |------|-------------|
 | `list-note-folders` | List note folders |
 | `list-notes` | List notes |
-| `read-note` | Read note content (supports `includeAttachments`) |
+| `read-note` | Read note content with advanced attachment discovery options |
 | `note-export-attachment` | Export embedded file and return resource URI |
 | `create-note` | Create new note |
 | `search-notes` | Search notes |
 
 Attachment flow:
 - Call `read-note` with `includeAttachments: true` to get attachment metadata and `attachmentId`.
+- For broader detection, use `attachmentDiscoveryMode: "hybrid"` (default), or `"html"` / `"jxa"`.
+- Use `includeUnresolvedEmbeds: true` to surface embedded references that are not yet locally exportable.
+- Use `includeDiscoveryStats: true` to get diagnostics (`attemptedSources`, dedupe counts, unresolved count).
 - If an attachment has `exportHint: "cloud_only_placeholder"`, download it locally first with `icloud-download` using the returned `icloudRelativePath`.
 - Call `note-export-attachment` with `noteId` and `attachmentId`.
 - Use MCP `resources/read` with the returned URI (for example `notes-attachment://...`) to fetch content.

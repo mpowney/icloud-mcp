@@ -85,6 +85,57 @@ function buildAttachmentResourceUri(noteId, attachmentId) {
   return `notes-attachment://${encodeURIComponent(noteId)}/${encodeURIComponent(attachmentId)}`;
 }
 
+function parseReferenceScheme(value) {
+  if (!value || typeof value !== 'string') return null;
+  const match = value.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function classifyAttachmentKind(attachment) {
+  const mime = (attachment.mimeType || '').toLowerCase();
+  const uti = (attachment.uti || '').toLowerCase();
+  const type = (attachment.type || '').toLowerCase();
+  const scheme = attachment.referenceScheme || parseReferenceScheme(attachment.url);
+
+  if (scheme === 'http' || scheme === 'https') return 'rich_link';
+  if (mime.startsWith('image/') || uti.includes('image') || type.includes('image')) return 'image';
+  if (mime.startsWith('video/') || uti.includes('movie') || type.includes('video')) return 'video';
+  if (mime.startsWith('audio/') || uti.includes('audio') || type.includes('audio')) return 'audio';
+  if (uti.includes('pdf') || mime === 'application/pdf') return 'file';
+  if (uti.includes('drawing') || type.includes('drawing')) return 'drawing';
+  if (uti.includes('scan') || type.includes('scan')) return 'scan';
+  if (attachment.filePath || attachment.url) return 'file';
+  return 'unknown';
+}
+
+function isResolvableReference(attachment) {
+  return Boolean(attachment.filePath || toAbsolutePathFromFileUrl(attachment.url));
+}
+
+function inferUnresolvedReason(attachment) {
+  if (attachment.cloudOnly) return 'cloud_only_placeholder';
+  const scheme = attachment.referenceScheme || parseReferenceScheme(attachment.url);
+  if (scheme && !['file', 'http', 'https'].includes(scheme)) {
+    return 'unsupported_scheme';
+  }
+  if (attachment.url || attachment.filePath) return 'not_locally_resolved';
+  return 'no_local_path_exposed';
+}
+
+function buildUnresolvedEmbed(attachment) {
+  return {
+    attachmentId: attachment.attachmentId,
+    name: attachment.name || null,
+    sourceKind: attachment.sourceKind,
+    referenceScheme: attachment.referenceScheme || parseReferenceScheme(attachment.url),
+    rawReference: attachment.url || attachment.filePath || null,
+    reason: inferUnresolvedReason(attachment),
+    exportHint: attachment.exportHint,
+    cloudOnly: attachment.cloudOnly === true,
+    icloudRelativePath: attachment.icloudRelativePath || null
+  };
+}
+
 function isUnderIcloudDrive(filePath) {
   if (!filePath) return false;
   const root = path.resolve(ICLOUD_DRIVE_ROOT);
@@ -124,10 +175,16 @@ async function enrichAttachment(raw, noteId, index) {
     mimeType: raw?.mimeType || null,
     uti: raw?.uti || null,
     type: raw?.type || null,
+    htmlTag: raw?.htmlTag || null,
+    htmlAttr: raw?.htmlAttr || null,
+    rawReference: raw?.rawReference || null,
+    referenceScheme: raw?.referenceScheme || parseReferenceScheme(raw?.url || raw?.rawReference),
     size: typeof raw?.size === 'number' ? raw.size : null,
     icloudRelativePath: null,
     cloudOnly: false,
+    cloudState: 'unknown',
     downloadingStatus: null,
+    attachmentKind: 'unknown',
     available: false,
     exportHint: 'not_available'
   };
@@ -138,6 +195,10 @@ async function enrichAttachment(raw, noteId, index) {
   }
 
   attachment.icloudRelativePath = toIcloudRelativePath(candidatePath);
+  const mdlsStatus = await readDownloadingStatus(candidatePath);
+  if (mdlsStatus) {
+    attachment.downloadingStatus = mdlsStatus;
+  }
 
   try {
     const stat = await fs.stat(candidatePath);
@@ -153,44 +214,55 @@ async function enrichAttachment(raw, noteId, index) {
         attachment.mimeType = guessMimeTypeFromName(attachment.name);
       }
 
-      if (attachment.icloudRelativePath) {
-        const downloadingStatus = await readDownloadingStatus(candidatePath);
-        if (downloadingStatus) {
-          attachment.downloadingStatus = downloadingStatus;
-        }
-      }
+      attachment.cloudState = 'local';
     }
   } catch {
-    if (attachment.icloudRelativePath) {
+    if (attachment.icloudRelativePath || attachment.downloadingStatus === 'NotDownloaded') {
       attachment.cloudOnly = true;
+      attachment.cloudState = 'cloud_only';
       attachment.exportHint = 'cloud_only_placeholder';
-      attachment.downloadingStatus = 'NotDownloaded';
+      attachment.downloadingStatus = attachment.downloadingStatus || 'NotDownloaded';
     } else {
       attachment.exportHint = 'metadata_only';
     }
   }
 
+  attachment.attachmentKind = classifyAttachmentKind(attachment);
+
   return attachment;
 }
 
-async function normalizeAttachments(rawAttachments, noteId, maxAttachments = 50) {
+async function normalizeAttachments(rawAttachments, noteId, maxAttachments = 50, dedupeMode = 'safe') {
   if (!Array.isArray(rawAttachments)) {
-    return [];
+    return { attachments: [], dedupedCount: 0, inputCount: 0, truncated: false };
   }
 
   const normalized = [];
   const seen = new Set();
   const cap = Math.max(1, Math.min(Number(maxAttachments) || 50, 500));
+  let dedupedCount = 0;
 
   for (let i = 0; i < rawAttachments.length && normalized.length < cap; i += 1) {
     const enriched = await enrichAttachment(rawAttachments[i], noteId, i);
-    const dedupeKey = [enriched.scriptId || '', enriched.filePath || '', enriched.url || '', enriched.name || ''].join('|');
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
+    if (dedupeMode !== 'none') {
+      const dedupeKey = dedupeMode === 'strict'
+        ? [enriched.scriptId || '', enriched.filePath || '', enriched.url || '', enriched.name || '', enriched.sourceKind || ''].join('|')
+        : [enriched.scriptId || '', enriched.filePath || '', enriched.url || '', enriched.name || ''].join('|');
+      if (seen.has(dedupeKey)) {
+        dedupedCount += 1;
+        continue;
+      }
+      seen.add(dedupeKey);
+    }
     normalized.push(enriched);
   }
 
-  return normalized;
+  return {
+    attachments: normalized,
+    dedupedCount,
+    inputCount: rawAttachments.length,
+    truncated: rawAttachments.length > cap
+  };
 }
 
 /**
@@ -279,6 +351,16 @@ async function listNotes(folderName = null, count = 25) {
 async function readNote(noteId, options = {}) {
   const includeAttachments = options.includeAttachments === true;
   const maxAttachments = Math.max(1, Math.min(Number(options.maxAttachments) || 50, 500));
+  const attachmentDiscoveryMode = ['jxa', 'html', 'hybrid', 'deep'].includes(options.attachmentDiscoveryMode)
+    ? options.attachmentDiscoveryMode
+    : 'hybrid';
+  const includeUnresolvedEmbeds = options.includeUnresolvedEmbeds !== false;
+  const includeDiscoveryStats = options.includeDiscoveryStats === true;
+  const dedupeMode = ['none', 'safe', 'strict'].includes(options.dedupeMode)
+    ? options.dedupeMode
+    : 'safe';
+  const useMethodDiscovery = attachmentDiscoveryMode !== 'html';
+  const useHtmlDiscovery = attachmentDiscoveryMode !== 'jxa';
 
   const script = `
     const notes = Application('Notes');
@@ -310,7 +392,11 @@ async function readNote(noteId, options = {}) {
         mimeType: valueFor(raw, 'mimeType') || valueFor(raw, 'contentType'),
         uti: valueFor(raw, 'uti') || valueFor(raw, 'uniformTypeIdentifier'),
         type: valueFor(raw, 'type') || valueFor(raw, 'kind'),
-        size: valueFor(raw, 'size') || valueFor(raw, 'fileSize')
+        size: valueFor(raw, 'size') || valueFor(raw, 'fileSize'),
+        htmlTag: null,
+        htmlAttr: null,
+        rawReference: null,
+        referenceScheme: null
       };
 
       target.push(record);
@@ -334,21 +420,49 @@ async function readNote(noteId, options = {}) {
 
     function collectFromBody(body, output, limit) {
       try {
-        const regex = /(?:src|href|data)=["']([^"']+)["']/gi;
+        const attrRegex = /<(img|a|source|video|audio|object|embed)\b[^>]*?(src|href|data|srcset|poster|data-src)=["']([^"']+)["']/gi;
+        const cssRegex = /style=["'][^"']*url\(([^\)]+)\)[^"']*["']/gi;
         let match;
 
-        while ((match = regex.exec(body)) && output.length < limit) {
-          const url = match[1];
+        while ((match = attrRegex.exec(body)) && output.length < limit) {
+          const htmlTag = (match[1] || '').toLowerCase();
+          const htmlAttr = (match[2] || '').toLowerCase();
+          const rawValue = (match[3] || '').trim();
+          const reference = htmlAttr === 'srcset' ? rawValue.split(',')[0].trim().split(/\s+/)[0] : rawValue;
+
           output.push({
             source: 'body-html',
-            url,
-            filePath: (typeof url === 'string' && url.startsWith('file://')) ? decodeURIComponent(url.replace('file://', '')) : null,
+            url: reference,
+            filePath: (typeof reference === 'string' && reference.startsWith('file://')) ? decodeURIComponent(reference.replace('file://', '')) : null,
             name: null,
             size: null,
             mimeType: null,
             uti: null,
             type: null,
-            scriptId: null
+            scriptId: null,
+            htmlTag,
+            htmlAttr,
+            rawReference: rawValue,
+            referenceScheme: (reference.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/) || [])[1] || null
+          });
+        }
+
+        while ((match = cssRegex.exec(body)) && output.length < limit) {
+          const rawValue = (match[1] || '').replace(/["']/g, '').trim();
+          output.push({
+            source: 'body-style',
+            url: rawValue,
+            filePath: (typeof rawValue === 'string' && rawValue.startsWith('file://')) ? decodeURIComponent(rawValue.replace('file://', '')) : null,
+            name: null,
+            size: null,
+            mimeType: null,
+            uti: null,
+            type: null,
+            scriptId: null,
+            htmlTag: null,
+            htmlAttr: 'style',
+            rawReference: rawValue,
+            referenceScheme: (rawValue.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/) || [])[1] || null
           });
         }
       } catch (e) {
@@ -367,13 +481,29 @@ async function readNote(noteId, options = {}) {
             const plaintext = note.plaintext();
 
             const attachments = [];
+            const discovery = {
+              mode: '${escapeJXA(attachmentDiscoveryMode)}',
+              attemptedSources: [],
+              sourceCounts: {}
+            };
             if (${includeAttachments}) {
-              const candidateMethods = ['attachments', 'mediaItems', 'objects', 'embeddedObjects', 'files'];
-              for (let i = 0; i < candidateMethods.length && attachments.length < ${maxAttachments}; i += 1) {
-                collectFromMethod(note, candidateMethods[i], attachments, ${maxAttachments});
+              const candidateMethods = ['attachments', 'mediaItems', 'objects', 'embeddedObjects', 'files', 'images', 'links'];
+              if (${useMethodDiscovery}) {
+                for (let i = 0; i < candidateMethods.length && attachments.length < ${maxAttachments}; i += 1) {
+                  const before = attachments.length;
+                  collectFromMethod(note, candidateMethods[i], attachments, ${maxAttachments});
+                  const added = attachments.length - before;
+                  discovery.attemptedSources.push('method:' + candidateMethods[i]);
+                  discovery.sourceCounts['method:' + candidateMethods[i]] = added;
+                }
               }
-              if (attachments.length < ${maxAttachments}) {
+
+              if (${useHtmlDiscovery} && attachments.length < ${maxAttachments}) {
+                const before = attachments.length;
                 collectFromBody(body || '', attachments, ${maxAttachments});
+                const added = attachments.length - before;
+                discovery.attemptedSources.push('body-html');
+                discovery.sourceCounts['body-html'] = added;
               }
             }
 
@@ -385,7 +515,8 @@ async function readNote(noteId, options = {}) {
               creationDate: note.creationDate().toISOString(),
               modificationDate: note.modificationDate().toISOString(),
               folder: folder.name(),
-              attachments
+              attachments,
+              attachmentDiscovery: discovery
             };
             break;
           }
@@ -406,11 +537,41 @@ async function readNote(noteId, options = {}) {
     return parsed;
   }
 
-  const attachments = await normalizeAttachments(parsed.attachments || [], noteId, maxAttachments);
-  return {
+  const normalized = await normalizeAttachments(parsed.attachments || [], noteId, maxAttachments, dedupeMode);
+  const attachments = normalized.attachments;
+  const unresolvedEmbeds = includeUnresolvedEmbeds
+    ? attachments
+      .filter((item) => !item.available || !isResolvableReference(item))
+      .map(buildUnresolvedEmbed)
+    : [];
+
+  const output = {
     ...parsed,
     attachments
   };
+
+  if (includeUnresolvedEmbeds) {
+    output.unresolvedEmbeds = unresolvedEmbeds;
+  }
+
+  if (includeDiscoveryStats) {
+    output.attachmentDiscovery = {
+      ...parsed.attachmentDiscovery,
+      dedupeMode,
+      dedupedCount: normalized.dedupedCount,
+      inputCount: normalized.inputCount,
+      outputCount: attachments.length,
+      truncated: normalized.truncated,
+      unresolvedCount: unresolvedEmbeds.length,
+      warnings: attachmentDiscoveryMode === 'deep'
+        ? ['deep mode currently aliases hybrid extraction in this version']
+        : []
+    };
+  } else {
+    delete output.attachmentDiscovery;
+  }
+
+  return output;
 }
 
 /**
