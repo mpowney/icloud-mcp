@@ -60,7 +60,15 @@ function withErrorHandler(handler, context) {
   };
 }
 
+/**
+ * Backward-compatible alias used by tool modules.
+ */
+function handleError(error, context) {
+  return formatError(error, context);
+}
+
 module.exports = {
+  handleError,
   formatError,
   formatSuccess,
   withErrorHandler
