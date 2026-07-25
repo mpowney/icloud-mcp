@@ -17,6 +17,11 @@ module.exports = {
   USE_TEST_MODE: process.env.USE_TEST_MODE === 'true',
   USE_LOCAL_MODE: process.env.USE_LOCAL_MODE !== 'false', // Default to true (local mode)
 
+  // HTTP MCP transport settings
+  MCP_HTTP_HOST: process.env.MCP_HTTP_HOST || '0.0.0.0',
+  MCP_HTTP_PORT: Number.parseInt(process.env.MCP_HTTP_PORT || '3000', 10),
+  MCP_HTTP_PATH: process.env.MCP_HTTP_PATH || '/mcp',
+
   // Check if running on macOS (required for local mode)
   IS_MACOS: process.platform === 'darwin',
 

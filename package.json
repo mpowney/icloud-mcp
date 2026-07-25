@@ -5,8 +5,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "start:http": "node server-http.js",
     "test-mode": "USE_TEST_MODE=true node index.js",
-    "inspect": "npx -y @modelcontextprotocol/inspector node index.js"
+    "inspect": "npx -y @modelcontextprotocol/inspector node index.js",
+    "inspect:http": "npx -y @modelcontextprotocol/inspector http://localhost:3000/mcp"
   },
   "keywords": [
     "mcp",
@@ -19,6 +21,7 @@
   "author": "Carlos Lorenzo",
   "license": "MIT",
   "dependencies": {
+    "express": "^4.21.2",
     "ical.js": "^2.1.0",
     "imapflow": "^1.3.3",
     "mailparser": "^3.9.8",

@@ -123,6 +123,33 @@ Add to your Claude Desktop MCP settings (`~/Library/Application Support/Claude/c
 }
 ```
 
+### HTTP MCP Server (Hermes compatible)
+
+This project now includes a separate HTTP MCP server entrypoint with:
+
+- JSON-RPC over HTTP POST
+- SSE streaming response mode for compatible clients
+
+Set optional transport env vars:
+
+```env
+MCP_HTTP_HOST=0.0.0.0
+MCP_HTTP_PORT=3000
+MCP_HTTP_PATH=/mcp
+```
+
+Start the HTTP transport:
+
+```bash
+npm run start:http
+```
+
+Endpoints:
+
+- `POST /mcp` for JSON-RPC requests
+- `POST /mcp` with `Accept: text/event-stream` for SSE response streaming
+- `GET /mcp` to establish an SSE connection (ready + keep-alive events)
+
 ---
 
 ## Tools
@@ -344,11 +371,17 @@ icloud-mcp/
 # Run in local mode (default)
 npm start
 
+# Run HTTP MCP transport (Hermes)
+npm run start:http
+
 # Run in cloud mode
 USE_LOCAL_MODE=false npm start
 
 # Test with MCP Inspector
 npm run inspect
+
+# Inspect HTTP endpoint
+npm run inspect:http
 ```
 
 ---
