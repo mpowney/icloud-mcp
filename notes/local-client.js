@@ -91,8 +91,10 @@ async function readNote(noteId) {
   const script = `
     const notes = Application('Notes');
     const folders = notes.folders();
+    let found = null;
 
     for (let folder of folders) {
+      if (found) break;
       try {
         const notesList = folder.notes();
         for (let note of notesList) {
@@ -101,7 +103,7 @@ async function readNote(noteId) {
             const body = note.body();
             const plaintext = note.plaintext();
 
-            return JSON.stringify({
+            found = {
               id: note.id(),
               name: note.name(),
               body: body,
@@ -109,13 +111,14 @@ async function readNote(noteId) {
               creationDate: note.creationDate().toISOString(),
               modificationDate: note.modificationDate().toISOString(),
               folder: folder.name()
-            });
+            };
+            break;
           }
         }
       } catch (e) {}
     }
 
-    return JSON.stringify(null);
+    JSON.stringify(found);
   `;
 
   const result = await runJXA(script);
