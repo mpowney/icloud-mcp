@@ -34,18 +34,71 @@ function isLikelyText(buffer, mimeType) {
   return !buffer.includes(0);
 }
 
-async function getMessageSource(emailId) {
+async function fetchMessageById(emailId, folder = 'inbox') {
+  const mailboxName = getMailboxName(folder);
   const script = `
     const mail = Application('Mail');
-    const msg = mail.messages.byId(${emailId});
-    JSON.stringify({
-      id: msg.id(),
-      source: msg.source()
-    });
+    const targetId = '${escapeJXA(String(emailId))}';
+    const preferredMailbox = '${escapeJXA(String(mailboxName || ''))}';
+    let found = null;
+
+    function asArray(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
+    function findInMessages(messages) {
+      const list = asArray(messages);
+      for (let i = 0; i < list.length; i += 1) {
+        const msg = list[i];
+        try {
+          if (String(msg.id()) === targetId) {
+            return msg;
+          }
+        } catch (e) {}
+      }
+      return null;
+    }
+
+    function serialize(msg) {
+      return {
+        id: msg.id(),
+        subject: msg.subject(),
+        from: msg.sender(),
+        to: msg.toRecipients().map((r) => r.address()),
+        cc: msg.ccRecipients().map((r) => r.address()),
+        date: msg.dateReceived().toISOString(),
+        body: msg.content(),
+        source: msg.source(),
+        read: msg.readStatus()
+      };
+    }
+
+    const accounts = asArray(mail.accounts());
+    for (let a = 0; a < accounts.length && !found; a += 1) {
+      const account = accounts[a];
+      try {
+        if (preferredMailbox) {
+          const mailbox = account.mailboxes.byName(preferredMailbox);
+          found = findInMessages(mailbox.messages());
+        }
+      } catch (e) {}
+    }
+
+    if (!found) {
+      try {
+        found = findInMessages(mail.messages());
+      } catch (e) {}
+    }
+
+    JSON.stringify(found ? serialize(found) : null);
   `;
 
   const result = await runJXA(script);
-  const parsed = result ? JSON.parse(result) : null;
+  return result ? JSON.parse(result) : null;
+}
+
+async function getMessageSource(emailId, folder = 'inbox') {
+  const parsed = await fetchMessageById(emailId, folder);
   return parsed?.source || null;
 }
 
@@ -98,26 +151,8 @@ async function listEmails(folder = 'inbox', count = 25) {
  * @param {string} emailId - Email ID
  * @returns {Promise<Object>} - Email content
  */
-async function readEmail(emailId) {
-  const script = `
-    const mail = Application('Mail');
-    const msg = mail.messages.byId(${emailId});
-
-    JSON.stringify({
-      id: msg.id(),
-      subject: msg.subject(),
-      from: msg.sender(),
-      to: msg.toRecipients().map(r => r.address()),
-      cc: msg.ccRecipients().map(r => r.address()),
-      date: msg.dateReceived().toISOString(),
-      body: msg.content(),
-      source: msg.source(),
-      read: msg.readStatus()
-    });
-  `;
-
-  const result = await runJXA(script);
-  const parsed = result ? JSON.parse(result) : null;
+async function readEmail(emailId, folder = 'inbox') {
+  const parsed = await fetchMessageById(emailId, folder);
   if (!parsed) return null;
 
   let attachments = [];
@@ -152,7 +187,7 @@ async function readEmail(emailId) {
  * @returns {Promise<Object>} - Resource content payload
  */
 async function readAttachmentResource(emailId, selector, options = {}) {
-  const source = await getMessageSource(emailId);
+  const source = await getMessageSource(emailId, options.folderHint || 'inbox');
   if (!source) {
     throw new Error(`Message not found: ${emailId}`);
   }
