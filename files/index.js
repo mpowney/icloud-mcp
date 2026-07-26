@@ -2,10 +2,71 @@
  * iCloud Drive files module (local sync folder only)
  */
 
+const fs = require('fs').promises;
+const path = require('path');
 const localClient = require('./local-client');
 const icloudTools = require('./icloud-tools-client');
 const spotlight = require('./spotlight-client');
 const { handleError } = require('../utils/error-handler');
+
+const MAX_RESOURCE_LIST_FILES = 2000;
+const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.json', '.csv', '.xml', '.html', '.js', '.ts', '.yaml', '.yml', '.env']);
+
+function encodeIcloudFileUri(relativePath) {
+  const normalized = String(relativePath || '').replace(/^\/+/, '');
+  return `icloud-file://${encodeURIComponent(normalized).replace(/%2F/g, '/')}`;
+}
+
+function parseIcloudFileUri(uri) {
+  const prefix = 'icloud-file://';
+  if (typeof uri !== 'string' || !uri.startsWith(prefix)) {
+    return null;
+  }
+
+  const encodedPath = uri.slice(prefix.length).replace(/^\/+/, '');
+  if (!encodedPath) return '';
+
+  try {
+    return decodeURIComponent(encodedPath);
+  } catch {
+    return null;
+  }
+}
+
+function guessMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.json': 'application/json',
+    '.csv': 'text/csv',
+    '.html': 'text/html',
+    '.xml': 'application/xml',
+    '.pdf': 'application/pdf',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.heic': 'image/heic',
+    '.mov': 'video/quicktime',
+    '.mp4': 'video/mp4',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4'
+  };
+
+  return map[ext] || 'application/octet-stream';
+}
+
+function isLikelyText(buffer, filePath, mimeType) {
+  if ((mimeType || '').startsWith('text/')) return true;
+  if (mimeType === 'application/json' || mimeType === 'application/xml') return true;
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (TEXT_EXTENSIONS.has(ext)) return true;
+
+  return !buffer.includes(0);
+}
 
 async function requireIcloudTools() {
   const hint = await icloudTools.getInstallHint();
@@ -433,4 +494,45 @@ const filesTools = [
   }
 ];
 
-module.exports = { filesTools };
+const filesResources = {
+  async list() {
+    const walk = await localClient.walkDrive({ relativePath: '', maxDepth: 6, maxFiles: MAX_RESOURCE_LIST_FILES });
+
+    return (walk.files || []).map((file) => ({
+      uri: encodeIcloudFileUri(file.path),
+      name: file.name,
+      mimeType: guessMimeType(file.path),
+      description: `iCloud Drive file (${file.path})`
+    }));
+  },
+
+  async read(uri) {
+    const relativePath = parseIcloudFileUri(uri);
+    if (relativePath == null) return null;
+
+    const absolutePath = localClient.resolveSafePath(relativePath);
+    const stat = await fs.stat(absolutePath);
+    if (!stat.isFile()) {
+      throw new Error('Resource URI does not point to a file');
+    }
+
+    const buffer = await fs.readFile(absolutePath);
+    const mimeType = guessMimeType(relativePath);
+
+    if (isLikelyText(buffer, relativePath, mimeType)) {
+      return {
+        uri,
+        mimeType,
+        text: buffer.toString('utf8')
+      };
+    }
+
+    return {
+      uri,
+      mimeType,
+      blob: buffer.toString('base64')
+    };
+  }
+};
+
+module.exports = { filesTools, filesResources };

@@ -3,8 +3,51 @@
  * Accesses Mail.app via AppleScript
  */
 
+const { simpleParser } = require('mailparser');
 const { runAppleScript, runJXA, escapeAppleScript, escapeJXA } = require('../utils/applescript');
 const config = require('../config');
+
+function selectAttachment(attachments, selector) {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return null;
+  }
+
+  if (typeof selector === 'string' && /^\d+$/.test(selector)) {
+    const oneBasedIndex = Number(selector);
+    if (!Number.isNaN(oneBasedIndex) && oneBasedIndex > 0 && oneBasedIndex <= attachments.length) {
+      return attachments[oneBasedIndex - 1];
+    }
+  }
+
+  if (typeof selector === 'string' && selector.trim()) {
+    const wanted = selector.trim().toLowerCase();
+    const byName = attachments.find((item) => (item.filename || '').toLowerCase() === wanted);
+    if (byName) return byName;
+  }
+
+  return attachments[0];
+}
+
+function isLikelyText(buffer, mimeType) {
+  if ((mimeType || '').startsWith('text/')) return true;
+  if (mimeType === 'application/json' || mimeType === 'application/xml') return true;
+  return !buffer.includes(0);
+}
+
+async function getMessageSource(emailId) {
+  const script = `
+    const mail = Application('Mail');
+    const msg = mail.messages.byId(${emailId});
+    JSON.stringify({
+      id: msg.id(),
+      source: msg.source()
+    });
+  `;
+
+  const result = await runJXA(script);
+  const parsed = result ? JSON.parse(result) : null;
+  return parsed?.source || null;
+}
 
 /**
  * List emails from a mailbox
@@ -74,6 +117,52 @@ async function readEmail(emailId) {
 
   const result = await runJXA(script);
   return result ? JSON.parse(result) : null;
+}
+
+/**
+ * Read an email attachment as MCP resource content.
+ * @param {string} emailId - Mail message ID
+ * @param {string} selector - Attachment filename or 1-based index
+ * @param {Object} options - Additional options
+ * @returns {Promise<Object>} - Resource content payload
+ */
+async function readAttachmentResource(emailId, selector, options = {}) {
+  const source = await getMessageSource(emailId);
+  if (!source) {
+    throw new Error(`Message not found: ${emailId}`);
+  }
+
+  const parsed = await simpleParser(source);
+  const attachments = parsed.attachments || [];
+  if (attachments.length === 0) {
+    throw new Error('Message has no attachments');
+  }
+
+  const selected = selectAttachment(attachments, selector);
+  if (!selected) {
+    throw new Error('Attachment not found');
+  }
+
+  const filename = selected.filename || `attachment-${selector || 1}`;
+  const mimeType = selected.contentType || 'application/octet-stream';
+  const safeId = encodeURIComponent(String(emailId));
+  const safeSelector = encodeURIComponent(String(selector || filename));
+  const uri = `mail-attachment://${safeId}/${safeSelector}`;
+  const content = selected.content || Buffer.alloc(0);
+
+  if (isLikelyText(content, mimeType)) {
+    return {
+      uri,
+      mimeType,
+      text: content.toString('utf8')
+    };
+  }
+
+  return {
+    uri,
+    mimeType,
+    blob: content.toString('base64')
+  };
 }
 
 /**
@@ -253,5 +342,6 @@ module.exports = {
   searchEmails,
   markAsRead,
   listFolders,
-  deleteEmail
+  deleteEmail,
+  readAttachmentResource
 };

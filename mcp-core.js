@@ -16,11 +16,11 @@ function loadToolsAndMode() {
 
     const { remindersTools } = require('./reminders');
     const { notesTools, notesResources } = require('./notes');
+    const { emailTools, emailResources } = require('./email');
     const { messagesTools } = require('./messages');
     const { safariTools } = require('./safari');
     const { musicTools } = require('./music');
-    const { filesTools } = require('./files');
-    const { emailTools } = require('./email');
+    const { filesTools, filesResources } = require('./files');
     const { calendarTools } = require('./calendar');
     const { contactsTools } = require('./contacts');
 
@@ -37,9 +37,9 @@ function loadToolsAndMode() {
       ...filesTools
     ];
 
-    resourceProviders = [notesResources].filter(Boolean);
+    resourceProviders = [notesResources, filesResources, emailResources].filter(Boolean);
   } else {
-    const { emailTools } = require('./email');
+    const { emailTools, emailResources } = require('./email');
     const { calendarTools } = require('./calendar');
     const { contactsTools } = require('./contacts');
 
@@ -53,6 +53,8 @@ function loadToolsAndMode() {
       ...calendarTools,
       ...contactsTools
     ];
+
+    resourceProviders = [emailResources].filter(Boolean);
   }
 
   return { tools, mode, resourceProviders };

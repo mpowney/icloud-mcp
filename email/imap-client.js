@@ -92,6 +92,33 @@ function mapListMessage(message) {
   };
 }
 
+function selectAttachment(attachments, selector) {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return null;
+  }
+
+  if (typeof selector === 'string' && /^\d+$/.test(selector)) {
+    const oneBasedIndex = Number(selector);
+    if (!Number.isNaN(oneBasedIndex) && oneBasedIndex > 0 && oneBasedIndex <= attachments.length) {
+      return attachments[oneBasedIndex - 1];
+    }
+  }
+
+  if (typeof selector === 'string' && selector.trim()) {
+    const wanted = selector.trim().toLowerCase();
+    const byName = attachments.find((item) => (item.filename || '').toLowerCase() === wanted);
+    if (byName) return byName;
+  }
+
+  return attachments[0];
+}
+
+function isLikelyText(buffer, mimeType) {
+  if ((mimeType || '').startsWith('text/')) return true;
+  if (mimeType === 'application/json' || mimeType === 'application/xml') return true;
+  return !buffer.includes(0);
+}
+
 /**
  * Build ImapFlow search query from tool criteria
  */
@@ -262,11 +289,87 @@ async function listFolders() {
   }
 }
 
+async function readAttachmentResource(messageId, selector, options = {}) {
+  const uid = Number(messageId);
+  if (Number.isNaN(uid) || uid <= 0) {
+    throw new Error('For IMAP mode, message-id in mail-attachment URI must be a numeric UID.');
+  }
+
+  const primaryFolder = options.folderHint || 'inbox';
+  const folderCandidates = [
+    primaryFolder,
+    'inbox',
+    'sent',
+    'archive',
+    'drafts',
+    'trash',
+    'junk'
+  ].filter((value, index, arr) => value && arr.indexOf(value) === index);
+
+  let parsed = null;
+  let resolvedFolder = null;
+
+  for (const folder of folderCandidates) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      parsed = await withMailbox(folder, true, async (client) => {
+        const message = await client.fetchOne(uid, { source: true }, { uid: true });
+        if (!message?.source) return null;
+        return simpleParser(message.source);
+      });
+      if (parsed) {
+        resolvedFolder = folder;
+        break;
+      }
+    } catch {
+      // Ignore folder misses and continue trying candidates.
+    }
+  }
+
+  if (!parsed) {
+    throw new Error(`Message not found: ${uid}`);
+  }
+
+  const attachments = parsed.attachments || [];
+  if (attachments.length === 0) {
+    throw new Error('Message has no attachments');
+  }
+
+  const selected = selectAttachment(attachments, selector);
+  if (!selected) {
+    throw new Error('Attachment not found');
+  }
+
+  const mimeType = selected.contentType || 'application/octet-stream';
+  const content = selected.content || Buffer.alloc(0);
+  const safeUid = encodeURIComponent(String(uid));
+  const safeSelector = encodeURIComponent(String(selector || selected.filename || 1));
+  const uri = `mail-attachment://${safeUid}/${safeSelector}`;
+  const base = {
+    uri,
+    mimeType,
+    folder: resolvedFolder
+  };
+
+  if (isLikelyText(content, mimeType)) {
+    return {
+      ...base,
+      text: content.toString('utf8')
+    };
+  }
+
+  return {
+    ...base,
+    blob: content.toString('base64')
+  };
+}
+
 module.exports = {
   listEmails,
   readEmail,
   searchEmails,
   markAsRead,
   listFolders,
-  getFolderName
+  getFolderName,
+  readAttachmentResource
 };
