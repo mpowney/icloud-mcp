@@ -13,8 +13,7 @@ const MAX_RESOURCE_LIST_FILES = 2000;
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.json', '.csv', '.xml', '.html', '.js', '.ts', '.yaml', '.yml', '.env']);
 
 function encodeIcloudFileUri(relativePath) {
-  const normalized = String(relativePath || '').replace(/^\/+/, '');
-  return `icloud-file://${encodeURIComponent(normalized).replace(/%2F/g, '/')}`;
+  return localClient.encodeIcloudFileUri(relativePath);
 }
 
 function parseIcloudFileUri(uri) {
@@ -68,6 +67,84 @@ function isLikelyText(buffer, filePath, mimeType) {
   return !buffer.includes(0);
 }
 
+function relativePathFromAbsolute(absPath) {
+  if (!absPath || typeof absPath !== 'string') return null;
+  const root = path.resolve(localClient.getRoot());
+  const candidate = path.resolve(absPath);
+  if (candidate !== root && !candidate.startsWith(root + path.sep)) return null;
+  return path.relative(root, candidate);
+}
+
+function withIcloudUri(item) {
+  if (!item || typeof item !== 'object') return item;
+
+  if (typeof item.path === 'string') {
+    const out = {
+      ...item,
+      uri: item.uri || encodeIcloudFileUri(item.path)
+    };
+
+    if (typeof out.file === 'string' && !out.fileUri) {
+      out.fileUri = encodeIcloudFileUri(out.file);
+    }
+
+    return out;
+  }
+
+  const derivedPath = typeof item.absolutePath === 'string' ? relativePathFromAbsolute(item.absolutePath) : null;
+  if (derivedPath) {
+    return {
+      ...item,
+      uri: item.uri || encodeIcloudFileUri(derivedPath)
+    };
+  }
+
+  const out = { ...item };
+  let touched = false;
+
+  if (typeof out.file === 'string' && !out.fileUri) {
+    out.fileUri = encodeIcloudFileUri(out.file);
+    touched = true;
+  }
+  if (typeof out.src === 'string' && !out.srcUri) {
+    const srcRel = relativePathFromAbsolute(out.src) || out.src;
+    out.srcUri = encodeIcloudFileUri(srcRel);
+    touched = true;
+  }
+  if (typeof out.dst === 'string' && !out.dstUri) {
+    const dstRel = relativePathFromAbsolute(out.dst) || out.dst;
+    out.dstUri = encodeIcloudFileUri(dstRel);
+    touched = true;
+  }
+
+  if (touched) {
+    return out;
+  }
+
+  return item;
+}
+
+function withIcloudUrisDeep(value) {
+  if (Array.isArray(value)) {
+    return value.map(withIcloudUrisDeep);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const current = withIcloudUri(value);
+  const out = { ...current };
+
+  for (const [key, nested] of Object.entries(out)) {
+    if (nested && typeof nested === 'object') {
+      out[key] = withIcloudUrisDeep(nested);
+    }
+  }
+
+  return out;
+}
+
 async function requireIcloudTools() {
   const hint = await icloudTools.getInstallHint();
   if (!hint.available) {
@@ -116,7 +193,7 @@ const filesTools = [
     handler: async ({ path: relPath = '', recursive = true, filter = 'all', sort }) => {
       try {
         await requireIcloudTools();
-        const result = await icloudTools.getSyncStatus(relPath, { recursive, filter, sort });
+        const result = withIcloudUrisDeep(await icloudTools.getSyncStatus(relPath, { recursive, filter, sort }));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
         return handleError(error, 'icloud-sync-status');
@@ -261,6 +338,27 @@ const filesTools = [
     }
   },
   {
+    name: 'icloud-create-file',
+    description: 'Create a text file in iCloud Drive',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to iCloud Drive root' },
+        content: { type: 'string', description: 'File contents (UTF-8 text)' },
+        overwrite: { type: 'boolean', description: 'Overwrite file if it already exists (default: false)' }
+      },
+      required: ['path']
+    },
+    handler: async ({ path: relPath, content = '', overwrite = false }) => {
+      try {
+        const result = await localClient.createFile(relPath, content, { overwrite });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (error) {
+        return handleError(error, 'icloud-create-file');
+      }
+    }
+  },
+  {
     name: 'icloud-rename',
     description: 'Rename/move a file or folder in iCloud Drive',
     inputSchema: {
@@ -333,7 +431,7 @@ const filesTools = [
     },
     handler: async ({ path: relPath = '', recursive = false, maxDepth = 2 }) => {
       try {
-        const files = await localClient.listFiles(relPath, { recursive, maxDepth });
+        const files = withIcloudUrisDeep(await localClient.listFiles(relPath, { recursive, maxDepth }));
         return { content: [{ type: 'text', text: JSON.stringify(files, null, 2) }] };
       } catch (error) {
         return handleError(error, 'list-icloud-files');
@@ -384,7 +482,7 @@ const filesTools = [
     },
     handler: async ({ path: relPath = '', maxDepth = 8, maxFiles = 5000 }) => {
       try {
-        const result = await localClient.walkDrive({ relativePath: relPath, maxDepth, maxFiles });
+        const result = withIcloudUrisDeep(await localClient.walkDrive({ relativePath: relPath, maxDepth, maxFiles }));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
         return handleError(error, 'scan-icloud-drive');
@@ -404,7 +502,7 @@ const filesTools = [
     },
     handler: async ({ query, maxResults = 100 }) => {
       try {
-        const result = await localClient.searchFiles(query, { maxResults });
+        const result = withIcloudUrisDeep(await localClient.searchFiles(query, { maxResults }));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
         return handleError(error, 'search-icloud-files');
@@ -434,10 +532,10 @@ const filesTools = [
     },
     handler: async ({ query, path: relPath = '', maxResults = 100 }) => {
       try {
-        const result = await spotlight.searchSpotlight(query, {
+        const result = withIcloudUrisDeep(await spotlight.searchSpotlight(query, {
           onlyInRelativePath: relPath,
           maxResults
-        });
+        }));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
         return handleError(error, 'icloud-spotlight-search');
@@ -456,7 +554,7 @@ const filesTools = [
     },
     handler: async ({ path: relPath }) => {
       try {
-        const result = await spotlight.getMetadata(relPath);
+        const result = withIcloudUrisDeep(await spotlight.getMetadata(relPath));
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
         return handleError(error, 'icloud-file-metadata');
@@ -485,10 +583,31 @@ const filesTools = [
         if (downloadIfCloud && await icloudTools.isAvailable()) {
           await icloudTools.ensureDownloaded(relPath);
         }
-        const file = await localClient.readFileText(relPath);
+        const file = withIcloudUrisDeep(await localClient.readFileText(relPath));
         return { content: [{ type: 'text', text: JSON.stringify(file, null, 2) }] };
       } catch (error) {
         return handleError(error, 'read-icloud-file');
+      }
+    }
+  },
+  {
+    name: 'icloud-create-file-binary',
+    description: 'Create a binary file in iCloud Drive from base64 content',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to iCloud Drive root' },
+        base64Content: { type: 'string', description: 'Raw base64-encoded file content' },
+        overwrite: { type: 'boolean', description: 'Overwrite file if it already exists (default: false)' }
+      },
+      required: ['path', 'base64Content']
+    },
+    handler: async ({ path: relPath, base64Content, overwrite = false }) => {
+      try {
+        const result = await localClient.createFileBinary(relPath, base64Content, { overwrite });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (error) {
+        return handleError(error, 'icloud-create-file-binary');
       }
     }
   }

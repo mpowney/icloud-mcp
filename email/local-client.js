@@ -111,12 +111,37 @@ async function readEmail(emailId) {
       cc: msg.ccRecipients().map(r => r.address()),
       date: msg.dateReceived().toISOString(),
       body: msg.content(),
+      source: msg.source(),
       read: msg.readStatus()
     });
   `;
 
   const result = await runJXA(script);
-  return result ? JSON.parse(result) : null;
+  const parsed = result ? JSON.parse(result) : null;
+  if (!parsed) return null;
+
+  let attachments = [];
+  let textBody = '';
+
+  try {
+    if (parsed.source) {
+      const mime = await simpleParser(parsed.source);
+      textBody = mime.text || '';
+      attachments = (mime.attachments || []).map((item) => ({
+        filename: item.filename || null,
+        contentType: item.contentType || 'application/octet-stream',
+        size: item.size || 0
+      }));
+    }
+  } catch {
+    // Fall back to AppleScript content only when MIME parsing fails.
+  }
+
+  return {
+    ...parsed,
+    text: textBody || parsed.body || '',
+    attachments
+  };
 }
 
 /**

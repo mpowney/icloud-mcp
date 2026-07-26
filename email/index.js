@@ -79,6 +79,31 @@ function indexAttachmentsForResources(message, folder) {
   }
 }
 
+function buildAttachmentResourceRefs(message) {
+  const messageId = String(message?.uid || message?.id || '');
+  if (!messageId) return [];
+
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  const rows = [];
+
+  for (let i = 0; i < attachments.length; i += 1) {
+    const attachment = attachments[i] || {};
+    const attachmentNumber = String(i + 1);
+    const filename = attachment.filename || null;
+
+    rows.push({
+      index: attachmentNumber,
+      filename,
+      byIndexUri: encodeMailAttachmentUri(messageId, attachmentNumber),
+      byFilenameUri: filename ? encodeMailAttachmentUri(messageId, filename) : null,
+      contentType: attachment.contentType || 'application/octet-stream',
+      size: attachment.size || 0
+    });
+  }
+
+  return rows;
+}
+
 /**
  * Handler: List emails
  */
@@ -123,8 +148,14 @@ async function handleReadEmail(args) {
   }
 
   const attachments = email.attachments || [];
+  const attachmentRefs = buildAttachmentResourceRefs(email);
   const attachmentInfo = attachments.length > 0
-    ? `\n\nAttachments (${attachments.length}):\n${attachments.map(a => `- ${a.filename} (${a.contentType}, ${Math.round(a.size / 1024)}KB)`).join('\n')}`
+    ? `\n\nAttachments (${attachments.length}):\n${attachmentRefs.map((a) => {
+      const displayName = a.filename || `attachment-${a.index}`;
+      const sizeKb = Math.round((a.size || 0) / 1024);
+      const byFilename = a.byFilenameUri ? `\n  URI (filename): ${a.byFilenameUri}` : '';
+      return `- ${displayName} (${a.contentType}, ${sizeKb}KB)\n  URI (index): ${a.byIndexUri}${byFilename}`;
+    }).join('\n')}`
     : '';
 
   return formatSuccess(

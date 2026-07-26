@@ -15,6 +15,12 @@ const DEFAULT_ROOT = path.join(
 );
 
 const MAX_READ_BYTES = 512 * 1024; // 512 KB
+const MAX_WRITE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+function encodeIcloudFileUri(relativePath) {
+  const normalized = String(relativePath || '').replace(/^\/+/, '');
+  return `icloud-file://${encodeURIComponent(normalized).replace(/%2F/g, '/')}`;
+}
 
 function getRoot() {
   return process.env.ICLOUD_DRIVE_PATH || DEFAULT_ROOT;
@@ -87,6 +93,10 @@ async function listFiles(relativePath = '', { recursive = false, maxDepth = 2 } 
       modified
     };
 
+    if (item.type === 'file') {
+      item.uri = encodeIcloudFileUri(rel);
+    }
+
     results.push(item);
 
     if (recursive && entry.isDirectory() && maxDepth > 0) {
@@ -154,7 +164,8 @@ async function walkDrive({
           name: entry.name,
           size: st.size,
           modified: st.mtime.toISOString(),
-          extension: path.extname(entry.name).toLowerCase() || '(none)'
+          extension: path.extname(entry.name).toLowerCase() || '(none)',
+          uri: encodeIcloudFileUri(childRel)
         });
       } catch (e) {
         files.push({
@@ -163,6 +174,7 @@ async function walkDrive({
           size: null,
           modified: null,
           extension: path.extname(entry.name).toLowerCase() || '(none)',
+          uri: encodeIcloudFileUri(childRel),
           cloudOnly: true,
           error: e.message
         });
@@ -285,6 +297,7 @@ async function readFileText(relativePath, maxBytes = MAX_READ_BYTES) {
 
   return {
     path: relativePath,
+    uri: encodeIcloudFileUri(relativePath),
     size: stat.size,
     modified: stat.mtime.toISOString(),
     content: buffer.toString('utf8')
@@ -294,26 +307,106 @@ async function readFileText(relativePath, maxBytes = MAX_READ_BYTES) {
 async function createDirectory(relativePath) {
   const dirPath = resolveSafePath(relativePath);
   await fs.mkdir(dirPath, { recursive: true });
-  return { success: true, path: relativePath };
+  return { success: true, path: relativePath, uri: encodeIcloudFileUri(relativePath) };
+}
+
+async function createFile(relativePath, content = '', { overwrite = false } = {}) {
+  const filePath = resolveSafePath(relativePath);
+
+  // Ensure parent folder exists before creating the file.
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+  if (!overwrite) {
+    try {
+      await fs.access(filePath);
+      throw new Error('File already exists. Set overwrite=true to replace it.');
+    } catch (error) {
+      if (error.message.startsWith('File already exists')) throw error;
+    }
+  }
+
+  await fs.writeFile(filePath, String(content), 'utf8');
+  const stat = await fs.stat(filePath);
+
+  return {
+    success: true,
+    path: relativePath,
+    uri: encodeIcloudFileUri(relativePath),
+    size: stat.size,
+    overwritten: overwrite
+  };
+}
+
+async function createFileBinary(relativePath, base64Content, { overwrite = false, maxBytes = MAX_WRITE_BYTES } = {}) {
+  if (typeof base64Content !== 'string' || base64Content.trim() === '') {
+    throw new Error('base64Content is required and must be a non-empty base64 string.');
+  }
+
+  let buffer;
+  try {
+    buffer = Buffer.from(base64Content, 'base64');
+  } catch {
+    throw new Error('Invalid base64Content.');
+  }
+
+  if (!buffer || buffer.length === 0) {
+    throw new Error('Decoded base64 content is empty.');
+  }
+
+  if (buffer.length > maxBytes) {
+    throw new Error(`Binary payload too large (${buffer.length} bytes). Max ${maxBytes} bytes.`);
+  }
+
+  const filePath = resolveSafePath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+  if (!overwrite) {
+    try {
+      await fs.access(filePath);
+      throw new Error('File already exists. Set overwrite=true to replace it.');
+    } catch (error) {
+      if (error.message.startsWith('File already exists')) throw error;
+    }
+  }
+
+  await fs.writeFile(filePath, buffer);
+  const stat = await fs.stat(filePath);
+
+  return {
+    success: true,
+    path: relativePath,
+    uri: encodeIcloudFileUri(relativePath),
+    size: stat.size,
+    overwritten: overwrite,
+    encoding: 'base64'
+  };
 }
 
 async function renamePath(fromPath, toPath) {
   const source = resolveSafePath(fromPath);
   const target = resolveSafePath(toPath);
   await fs.rename(source, target);
-  return { success: true, from: fromPath, to: toPath };
+  return {
+    success: true,
+    from: fromPath,
+    to: toPath,
+    fromUri: encodeIcloudFileUri(fromPath),
+    toUri: encodeIcloudFileUri(toPath)
+  };
 }
 
 async function deletePath(relativePath, recursive = true) {
   const target = resolveSafePath(relativePath);
   await fs.rm(target, { recursive, force: false });
-  return { success: true, path: relativePath, recursive };
+  return { success: true, path: relativePath, uri: encodeIcloudFileUri(relativePath), recursive };
 }
 
 module.exports = {
   getDriveInfo,
   listFiles,
   readFileText,
+  createFile,
+  createFileBinary,
   createDirectory,
   renamePath,
   deletePath,
@@ -321,7 +414,9 @@ module.exports = {
   getDriveSummary,
   searchFiles,
   formatBytes,
+  encodeIcloudFileUri,
   getRoot,
   resolveSafePath,
-  MAX_READ_BYTES
+  MAX_READ_BYTES,
+  MAX_WRITE_BYTES
 };
