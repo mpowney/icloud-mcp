@@ -304,9 +304,8 @@ async function sendEmail({ to, cc, bcc, subject, body, isHtml = false  }) {
       tell newMessage
   `;
 
-  if (isHtml) {
-    script += `\n        set message html content to "<html><body>${escapeAppleScript(body)}</body></html>"`;
-  }
+  // Mail.app may deny setting HTML content directly via AppleScript (-1723).
+  // Keep delivery reliable by always sending the plain-text content.
 
   // Add To recipients
   for (const recipient of toRecipients) {
