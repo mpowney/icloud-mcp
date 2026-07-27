@@ -7,6 +7,66 @@ const { simpleParser } = require('mailparser');
 const { runAppleScript, runJXA, escapeAppleScript, escapeJXA } = require('../utils/applescript');
 const config = require('../config');
 
+const NAMED_HTML_ENTITIES = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' '
+};
+
+function decodeHtmlEntities(input) {
+  if (!input) return '';
+
+  return input.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity) => {
+    const lowered = entity.toLowerCase();
+
+    if (lowered[0] === '#') {
+      const isHex = lowered[1] === 'x';
+      const codePoint = Number.parseInt(isHex ? lowered.slice(2) : lowered.slice(1), isHex ? 16 : 10);
+      if (!Number.isNaN(codePoint)) {
+        try {
+          return String.fromCodePoint(codePoint);
+        } catch {
+          return match;
+        }
+      }
+      return match;
+    }
+
+    return NAMED_HTML_ENTITIES[lowered] || match;
+  });
+}
+
+function stripHtmlToPlainText(html) {
+  if (html === undefined || html === null) return '';
+
+  let text = String(html);
+
+  // Remove non-content sections first so they do not pollute output.
+  text = text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // Preserve structure from common block elements before stripping tags.
+  text = text.replace(/<\s*br\s*\/?>/gi, '\n');
+  text = text.replace(/<\s*\/\s*(p|div|section|article|header|footer|aside|h[1-6]|pre|blockquote|tr|table|ul|ol)\s*>/gi, '\n');
+  text = text.replace(/<\s*li\b[^>]*>/gi, '\n- ');
+
+  // Drop all remaining tags.
+  text = text.replace(/<[^>]+>/g, '');
+
+  text = decodeHtmlEntities(text);
+
+  // Normalize whitespace and emit CRLF line endings.
+  text = text.replace(/\r\n|\r|\n/g, '\n');
+  text = text.replace(/[ \t]+\n/g, '\n');
+  text = text.replace(/\n{3,}/g, '\n\n');
+  text = text.trim();
+
+  return text.replace(/\n/g, '\r\n');
+}
+
 function selectAttachment(attachments, selector) {
   if (!Array.isArray(attachments) || attachments.length === 0) {
     return null;
@@ -230,16 +290,24 @@ async function readAttachmentResource(emailId, selector, options = {}) {
  * @param {Object} options - Email options
  * @returns {Promise<Object>} - Send result
  */
-async function sendEmail({ to, cc, bcc, subject, body }) {
+async function sendEmail({ to, cc, bcc, subject, body, isHtml = false  }) {
   const toRecipients = Array.isArray(to) ? to : [to];
   const ccRecipients = cc ? (Array.isArray(cc) ? cc : [cc]) : [];
   const bccRecipients = bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : [];
 
+  
+  const plainTextBody = isHtml ? stripHtmlToPlainText(body) : body;
+
   let script = `
     tell application "Mail"
-      set newMessage to make new outgoing message with properties {subject:"${escapeAppleScript(subject)}", content:"${escapeAppleScript(body)}", visible:false}
+      set newMessage to make new outgoing message with properties {subject:"${escapeAppleScript(subject)}", content:"${escapeAppleScript(plainTextBody)}", visible:false}
       tell newMessage
   `;
+
+  if (isHtml) {
+    script += `\n        set content to "<html><body>${escapeAppleScript(body)}</body></html>"`;
+    script += `\n        set message type to html`;
+  }
 
   // Add To recipients
   for (const recipient of toRecipients) {
@@ -398,6 +466,7 @@ function getMailboxName(folder) {
 module.exports = {
   listEmails,
   readEmail,
+  stripHtmlToPlainText,
   sendEmail,
   searchEmails,
   markAsRead,
