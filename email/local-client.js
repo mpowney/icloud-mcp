@@ -305,8 +305,7 @@ async function sendEmail({ to, cc, bcc, subject, body, isHtml = false  }) {
   `;
 
   if (isHtml) {
-    script += `\n        set content to "<html><body>${escapeAppleScript(body)}</body></html>"`;
-    script += `\n        set message type to html`;
+    script += `\n        set message html content to "<html><body>${escapeAppleScript(body)}</body></html>"`;
   }
 
   // Add To recipients
